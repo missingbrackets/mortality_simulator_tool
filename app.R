@@ -231,8 +231,9 @@ server <- function(input, output, session) {
   observeEvent(input$severity_file, {
     req(input$severity_file$datapath)
     tryCatch({
-      clean_df <- clean_severity_table(read_csv(input$severity_file$datapath, show_col_types = FALSE))
-      severity_raw_data(clean_df)
+      raw_df <- read_csv(input$severity_file$datapath, show_col_types = FALSE)
+      clean_df <- clean_severity_table(raw_df)
+      severity_raw_data(raw_df)
       severity_status_txt(sprintf("Uploaded severity table loaded: %s rows.", nrow(clean_df)))
       showNotification("Severity table uploaded.", type = "message")
     }, error = function(e) {
@@ -255,12 +256,12 @@ server <- function(input, output, session) {
 
   output$severity_preview <- renderDT({
     datatable(
-      severity_tbl() %>% select(loss_m, input_type, input_return_period, return_period_years, return_period_claims, exceed_prob_claim, percentile),
+      severity_tbl() %>% select(loss_m, input_type, input_return_period, return_period_years, return_period_claims, exceed_prob_fit, percentile),
       options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE),
       rownames = FALSE
     ) %>%
       formatRound(c("loss_m", "input_return_period", "return_period_years", "return_period_claims"), digits = 2) %>%
-      formatRound(c("exceed_prob_claim", "percentile"), digits = 4)
+      formatRound(c("exceed_prob_fit", "percentile"), digits = 4)
   })
 
   curve_fit <- mod_curve_fit_server("curve_fit", severity_tbl = severity_tbl)
