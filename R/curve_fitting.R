@@ -26,6 +26,7 @@ severity_prob_table <- function(severity_tbl) {
       exceed_prob_fit = pmin(pmax(1 / fit_return_period, 1e-8), 0.999999),
       percentile = safe_p(1 - exceed_prob_fit)
     ) %>%
+    filter(fit_return_period > 1) %>%
     arrange(percentile)
 }
 
