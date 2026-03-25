@@ -99,14 +99,14 @@ standardize_severity_table <- function(severity_tbl_raw,
       dplyr::mutate(
         return_period_years = input_return_period,
         return_period_claims = input_return_period * annual_claim_frequency,
-        fit_return_period = return_period_claims
+        fit_return_period = input_return_period
       )
   } else {
     df <- df |>
       dplyr::mutate(
         return_period_claims = input_return_period,
         return_period_years = input_return_period / annual_claim_frequency,
-        fit_return_period = return_period_claims
+        fit_return_period = input_return_period
       )
   }
 
