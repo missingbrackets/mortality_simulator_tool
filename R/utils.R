@@ -99,7 +99,7 @@ standardize_severity_table <- function(severity_tbl_raw,
       dplyr::mutate(
         return_period_years = input_return_period,
         return_period_claims = input_return_period * annual_claim_frequency,
-        fit_return_period = return_period_years
+        fit_return_period = return_period_claims
       )
   } else {
     df <- df |>
@@ -112,6 +112,7 @@ standardize_severity_table <- function(severity_tbl_raw,
 
   df |>
     dplyr::mutate(
+      input_type = input_type,
       annual_claim_frequency = annual_claim_frequency,
       exceed_prob_fit = pmin(pmax(1 / fit_return_period, 1e-8), 0.999999),
       percentile = 1 - exceed_prob_fit
