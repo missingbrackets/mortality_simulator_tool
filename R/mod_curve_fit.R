@@ -20,10 +20,13 @@ mod_curve_fit_ui <- function(id) {
         4,
         selectInput(ns("distribution"), "Candidate curve", choices = c("lognormal", "weibull", "gamma", "gpd"), selected = "lognormal"),
         radioButtons(ns("prob_view"), "Probability view", choices = c("Exceedance" = "exceed", "CDF" = "cdf"), selected = "exceed", inline = TRUE),
+        numericInput(ns("min_rp"), "Min. return period for fitting", value = 1, min = 0.01, step = 0.1),
+        helpText("Points with return period \u2264 this value are excluded from the fit (exceedance probability \u2265 1 is not a valid percentile)."),
+        tags$hr(),
         numericInput(ns("param1"), "meanlog", value = NA, step = 0.001),
         numericInput(ns("param2"), "sdlog", value = NA, step = 0.001),
         numericInput(ns("param3"), "Unused", value = NA, step = 0.001),
-        helpText("Changing the candidate curve re-fits to the converted claim-based severity table and loads fitted starting parameters. You can then tweak them manually."),
+        helpText("Changing the candidate curve or the min. RP re-fits and reloads starting parameters. You can then tweak them manually."),
         verbatimTextOutput(ns("param_help"))
       ),
       column(
@@ -40,10 +43,11 @@ mod_curve_fit_server <- function(id, severity_tbl) {
     auto_fit <- reactive({
       req(severity_tbl())
       req(nrow(severity_tbl()) >= 3)
-      fit_severity_curve(severity_tbl(), distribution = input$distribution, params_override = list())
+      req(is.finite(input$min_rp))
+      fit_severity_curve(severity_tbl(), distribution = input$distribution, params_override = list(), min_rp = input$min_rp)
     })
 
-    observeEvent(list(input$distribution, severity_tbl()), {
+    observeEvent(list(input$distribution, input$min_rp, severity_tbl()), {
       fit <- auto_fit()
       param_names <- curve_param_names(input$distribution)
       param_values <- unname(unlist(fit$params))
@@ -74,11 +78,12 @@ mod_curve_fit_server <- function(id, severity_tbl) {
     })
 
     selected_fit <- eventReactive(
-      list(severity_tbl(), input$distribution, input$param1, input$param2, input$param3),
+      list(severity_tbl(), input$distribution, input$min_rp, input$param1, input$param2, input$param3),
       {
         req(severity_tbl())
         req(nrow(severity_tbl()) >= 3)
-        fit_severity_curve(severity_tbl(), distribution = input$distribution, params_override = override_params())
+        req(is.finite(input$min_rp))
+        fit_severity_curve(severity_tbl(), distribution = input$distribution, params_override = override_params(), min_rp = input$min_rp)
       },
       ignoreInit = FALSE
     )
