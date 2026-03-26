@@ -121,11 +121,8 @@ standardize_severity_table <- function(severity_tbl_raw,
 }
 
 lookup_qx <- function(age, mortality_tbl) {
-  mortality_tbl %>%
-    arrange(abs(.data$age - age)) %>%
-    slice(1) %>%
-    pull(qx) %>%
-    .[[1]]
+  idx <- which.min(abs(mortality_tbl$age - age))
+  mortality_tbl$qx[idx]
 }
 
 per_actor_event_probs <- function(age, mortality_tbl, production_duration_days, injury_load) {
