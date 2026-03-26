@@ -14,6 +14,8 @@ source("R/curve_fitting.R")
 source("R/simulation_engine.R")
 source("R/export.R")
 source("R/mod_curve_fit.R")
+source("R/mod_mortality_calc.R")
+source("R/mod_sensitivity.R")
 
 metric_card <- function(title, value) {
   card(
@@ -42,7 +44,13 @@ ui <- fluidPage(
       numericInput("total_budget_m", "Total budget across all films (USD m)", value = 3000, min = 1, step = 1),
       numericInput("min_budget_m", "Minimum individual film budget (USD m)", value = 20, min = 0.1, step = 0.1),
       numericInput("max_budget_m", "Maximum individual film budget (USD m)", value = 100, min = 0.1, step = 0.1),
-      helpText("Budgets are randomly assigned between min and max, and forced to sum to the total portfolio budget."),
+      helpText("Budgets are randomly assigned between min and max, forced to sum to the total."),
+
+      tags$hr(),
+      h4("Frequency"),
+      numericInput("annual_claim_freq", "Expected annual cast-event frequency", value = 0.12, min = 0, step = 0.01),
+      uiOutput("freq_info"),
+      helpText("Use the Mortality Calculator tab to derive this from actor mortality assumptions."),
 
       tags$hr(),
       h4("Layer structure"),
@@ -51,12 +59,9 @@ ui <- fluidPage(
       numericInput("our_limit", "Our layer limit (USD m)", value = 50, min = 0, step = 1),
 
       tags$hr(),
-      h4("Attritional / cast assumptions"),
+      h4("Attritional"),
       numericInput("avg_attritional", "Average attritional ground-up loss per simulation (USD m)", value = 8, min = 0, step = 0.1),
       numericInput("attritional_cv", "Attritional coefficient of variation", value = 0.35, min = 0, step = 0.05),
-      numericInput("avg_key_actors", "Average number of key actors per production", value = 4, min = 1, step = 1),
-      numericInput("key_actor_age", "Assumed key actor age", value = 45, min = 0, max = 110, step = 1),
-      numericInput("injury_load", "Injury rate multiple to mortality", value = 1.5, min = 0, step = 0.1),
 
       tags$hr(),
       h4("Severity input interpretation"),
@@ -67,7 +72,6 @@ ui <- fluidPage(
         selected = "years",
         inline = TRUE
       ),
-      uiOutput("annual_freq_info"),
 
       tags$hr(),
       h4("Simulation controls"),
@@ -86,7 +90,7 @@ ui <- fluidPage(
           "Data inputs",
           br(),
           h4("Aggregate claims history (last 5 years)"),
-          p("Optional; used for context and benchmarking only in this version."),
+          p("Optional; used for context and benchmarking only."),
           fileInput("claims_history_file", "Upload CSV", accept = c(".csv")),
           DTOutput("claims_history_preview"),
           br(),
@@ -115,6 +119,11 @@ ui <- fluidPage(
           mod_curve_fit_ui("curve_fit")
         ),
         tabPanel(
+          "Mortality calculator",
+          br(),
+          mod_mortality_calc_ui("mort_calc")
+        ),
+        tabPanel(
           "Results",
           br(),
           fluidRow(
@@ -133,6 +142,11 @@ ui <- fluidPage(
           DTOutput("summary_table"),
           br(),
           DTOutput("distribution_check_table")
+        ),
+        tabPanel(
+          "Sensitivity",
+          br(),
+          mod_sensitivity_ui("sensitivity")
         ),
         tabPanel(
           "Simulation detail",
@@ -172,16 +186,14 @@ server <- function(input, output, session) {
       our_limit_m = input$our_limit,
       avg_attritional_m = input$avg_attritional,
       attritional_cv = input$attritional_cv,
-      avg_key_actors = input$avg_key_actors,
-      key_actor_age = input$key_actor_age,
-      injury_load = input$injury_load,
+      annual_claim_freq = input$annual_claim_freq,
       n_sims = input$n_sims,
       seed = input$seed
     )
   })
 
   annual_claim_freq <- reactive({
-    expected_annual_claim_frequency(assumptions_reactive(), mortality_data())
+    input$annual_claim_freq
   })
 
   severity_tbl <- reactive({
@@ -195,16 +207,15 @@ server <- function(input, output, session) {
   output$run_status <- renderText(run_status_txt())
   output$mortality_status <- renderUI(tags$small(style = "color:#555;", mortality_status_txt()))
   output$severity_status <- renderUI(tags$small(style = "color:#555;", severity_status_txt()))
-  output$annual_freq_info <- renderUI({
+  output$freq_info <- renderUI({
+    total_events <- input$annual_claim_freq * input$exposure_years
     tags$small(
       style = "color:#555;",
-      sprintf(
-        "Expected annual cast-event frequency used for year-to-claim conversion: %.4f claims/year.",
-        annual_claim_freq()
-      )
+      sprintf("Total expected events over %.1f-year exposure: %.2f", input$exposure_years, total_events)
     )
   })
 
+  # --- File uploads ---
   observeEvent(input$claims_history_file, {
     req(input$claims_history_file$datapath)
     tryCatch({
@@ -242,6 +253,7 @@ server <- function(input, output, session) {
     })
   })
 
+  # --- Data preview tables ---
   output$claims_history_preview <- renderDT({
     dt <- datatable(claims_history_data(), options = list(pageLength = 5, scrollX = TRUE, autoWidth = TRUE), rownames = FALSE)
     if ("aggregate_loss_m" %in% names(claims_history_data())) dt <- dt %>% formatRound("aggregate_loss_m", digits = 2)
@@ -264,10 +276,30 @@ server <- function(input, output, session) {
       formatRound(c("exceed_prob_fit", "percentile"), digits = 4)
   })
 
+  # --- Modules ---
   curve_fit <- mod_curve_fit_server("curve_fit", severity_tbl = severity_tbl)
 
+  mort_calc <- mod_mortality_calc_server(
+    "mort_calc",
+    n_productions = reactive(input$n_productions),
+    production_duration_days = reactive(input$production_duration_days),
+    exposure_years = reactive(input$exposure_years),
+    mortality_data = mortality_data
+  )
+
+  observeEvent(mort_calc$use_freq_trigger(), {
+    updateNumericInput(session, "annual_claim_freq", value = round(mort_calc$computed_freq(), 4))
+  })
+
+  mod_sensitivity_server(
+    "sensitivity",
+    base_assumptions = assumptions_reactive,
+    severity_tbl = severity_tbl,
+    selected_fit = reactive(curve_fit$selected_fit())
+  )
+
+  # --- Model run ---
   observeEvent(input$run_model, {
-    req(nrow(mortality_data()) > 0)
     req(nrow(severity_tbl()) >= 3)
     run_status_txt("Running model...")
 
@@ -289,7 +321,6 @@ server <- function(input, output, session) {
       incProgress(0.55, detail = "Simulating portfolio")
       res <- simulate_portfolio_losses(
         assumptions = assumptions_reactive(),
-        mortality_tbl = mortality_data(),
         severity_tbl = severity_tbl(),
         fit = fit_obj,
         claims_history = claims_history_data()
@@ -303,6 +334,7 @@ server <- function(input, output, session) {
     })
   })
 
+  # --- Results outputs ---
   output$vb_ground_up <- renderUI({
     req(sim_results())
     metric_card("Expected ground-up loss", sprintf("$%.2fm", sim_results()$summary$expected_ground_up_m))
@@ -317,7 +349,7 @@ server <- function(input, output, session) {
   })
   output$vb_avg_events <- renderUI({
     req(sim_results())
-    metric_card("Average cast death/injury events", number(sim_results()$summary$avg_cast_events, accuracy = 0.001))
+    metric_card("Average cast events", number(sim_results()$summary$avg_cast_events, accuracy = 0.001))
   })
   output$vb_avg_sev <- renderUI({
     req(sim_results())

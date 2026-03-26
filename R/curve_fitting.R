@@ -4,7 +4,7 @@ safe_p <- function(p) {
   pmin(pmax(p, 1e-8), 1 - 1e-8)
 }
 
-severity_prob_table <- function(severity_tbl) {
+severity_prob_table <- function(severity_tbl, min_rp = 1) {
   if (!"loss_m" %in% names(severity_tbl)) {
     stop("Severity table must contain loss_m")
   }
@@ -26,7 +26,7 @@ severity_prob_table <- function(severity_tbl) {
       exceed_prob_fit = pmin(pmax(1 / fit_return_period, 1e-8), 0.999999),
       percentile = safe_p(1 - exceed_prob_fit)
     ) %>%
-    filter(fit_return_period > 1) %>%
+    filter(fit_return_period > min_rp) %>%
     arrange(percentile)
 }
 
@@ -184,9 +184,9 @@ build_gpd_fit <- function(params, df) {
   )
 }
 
-fit_severity_curve <- function(severity_tbl, distribution = c("lognormal", "weibull", "gamma", "gpd"), params_override = list()) {
+fit_severity_curve <- function(severity_tbl, distribution = c("lognormal", "weibull", "gamma", "gpd"), params_override = list(), min_rp = 1) {
   distribution <- match.arg(distribution)
-  df <- severity_prob_table(severity_tbl)
+  df <- severity_prob_table(severity_tbl, min_rp = min_rp)
 
   base_params <- switch(
     distribution,
@@ -214,7 +214,8 @@ fit_severity_curve <- function(severity_tbl, distribution = c("lognormal", "weib
 
   comparison_tbl <- compare_fit_to_input(
     fit = list(params = built$params, qfun = built$qfun, pfun = built$pfun),
-    severity_tbl = df
+    severity_tbl = df,
+    min_rp = min_rp
   )
 
   list(
@@ -227,8 +228,8 @@ fit_severity_curve <- function(severity_tbl, distribution = c("lognormal", "weib
   )
 }
 
-compare_fit_to_input <- function(fit, severity_tbl) {
-  input_df <- severity_prob_table(severity_tbl) %>%
+compare_fit_to_input <- function(fit, severity_tbl, min_rp = 1) {
+  input_df <- severity_prob_table(severity_tbl, min_rp = min_rp) %>%
     mutate(source = "Input")
 
   extra_percentiles <- c(0.25, 0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995)

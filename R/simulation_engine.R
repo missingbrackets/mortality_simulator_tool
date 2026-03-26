@@ -2,7 +2,7 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 
-simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, fit, claims_history = NULL) {
+simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, claims_history = NULL) {
   set.seed(assumptions$seed)
 
   production_schedule <- make_production_schedule(
@@ -20,25 +20,14 @@ simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, 
       )
     )
 
-  probs <- per_actor_event_probs(
-    age = assumptions$key_actor_age,
-    mortality_tbl = mortality_tbl,
-    production_duration_days = assumptions$production_duration_days,
-    injury_load = assumptions$injury_load
-  )
-
-  exposure_tbl <- production_schedule %>%
-    mutate(
-      n_key_actors = assumptions$avg_key_actors,
-      death_prob_per_actor = probs$death_prob,
-      injury_prob_per_actor = probs$injury_prob
-    )
+  total_expected_events <- assumptions$annual_claim_freq * assumptions$exposure_years
+  n_prods <- nrow(production_schedule)
+  budgets <- production_schedule$budget_m
 
   empty_events <- tibble(
     sim_id = integer(),
     production_id = integer(),
     event_id = integer(),
-    event_type = character(),
     raw_severity_m = numeric(),
     severity_m = numeric(),
     production_budget_m = numeric(),
@@ -48,36 +37,31 @@ simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, 
   )
 
   event_detail <- map_dfr(seq_len(assumptions$n_sims), function(sim_id) {
-    death_counts <- rbinom(nrow(exposure_tbl), size = exposure_tbl$n_key_actors, prob = exposure_tbl$death_prob_per_actor)
-    injury_counts <- rbinom(nrow(exposure_tbl), size = exposure_tbl$n_key_actors, prob = exposure_tbl$injury_prob_per_actor)
-    total_counts <- death_counts + injury_counts
+    n_events <- rpois(1, total_expected_events)
+    if (n_events == 0) return(empty_events)
 
-    if (sum(total_counts) == 0) return(empty_events)
+    prod_assignments <- sample(seq_len(n_prods), size = n_events, replace = TRUE)
+    raw_sev <- fit$rfun(n_events)
 
-    map_dfr(seq_along(total_counts), function(prod_idx) {
-      n_ev <- total_counts[[prod_idx]]
-      if (n_ev == 0) return(NULL)
+    ev <- tibble(
+      sim_id = sim_id,
+      production_id = prod_assignments,
+      raw_severity_m = raw_sev,
+      production_budget_m = budgets[prod_assignments]
+    )
 
-      raw_sev <- fit$rfun(n_ev)
-      budget <- exposure_tbl$budget_m[[prod_idx]]
-      raw_total <- sum(raw_sev)
-      cap_factor <- min(1, budget / raw_total)
-      capped_sev <- raw_sev * cap_factor
-      n_death <- death_counts[[prod_idx]]
-
-      tibble(
-        sim_id = sim_id,
-        production_id = prod_idx,
-        event_id = seq_len(n_ev),
-        event_type = c(rep("death", n_death), rep("injury", n_ev - n_death)),
-        raw_severity_m = raw_sev,
-        severity_m = capped_sev,
-        production_budget_m = budget,
-        production_raw_loss_m = raw_total,
-        production_capped_loss_m = sum(capped_sev),
-        cap_factor = cap_factor
-      )
-    })
+    ev %>%
+      group_by(production_id) %>%
+      mutate(
+        production_raw_loss_m = sum(raw_severity_m),
+        cap_factor = pmin(1, production_budget_m / production_raw_loss_m),
+        severity_m = raw_severity_m * cap_factor,
+        production_capped_loss_m = sum(severity_m)
+      ) %>%
+      ungroup() %>%
+      mutate(event_id = row_number()) %>%
+      select(sim_id, production_id, event_id, raw_severity_m, severity_m,
+             production_budget_m, production_raw_loss_m, production_capped_loss_m, cap_factor)
   })
 
   sim_ids <- tibble(sim_id = seq_len(assumptions$n_sims))
@@ -135,8 +119,8 @@ simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, 
     avg_event_severity_m = if (nrow(event_detail) > 0) mean(event_detail$severity_m) else 0,
     prob_our_layer_hit = mean(simulation_summary$our_layer_loss_m > 0),
     avg_productions_capped = mean(simulation_summary$productions_capped),
-    annual_claim_frequency = expected_annual_claim_frequency(assumptions, mortality_tbl),
-    qx_used = probs$qx_death_annual
+    annual_claim_frequency = assumptions$annual_claim_freq,
+    total_expected_events = total_expected_events
   )
 
   summary_table <- tibble(
@@ -146,11 +130,11 @@ simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, 
       "Expected primary loss (USD m)",
       "Expected our layer loss (USD m)",
       "Probability our layer is hit",
-      "Average cast death/injury events",
-      "Average cast-event severity after budget cap (USD m)",
+      "Average cast events per simulation",
+      "Average event severity after budget cap (USD m)",
       "Average productions capped at budget",
-      "Expected annual cast-event frequency",
-      "Mortality qx used",
+      "Annual claim frequency (input)",
+      "Total expected events over exposure",
       "Selected severity curve"
     ),
     value = c(
@@ -163,7 +147,7 @@ simulate_portfolio_losses <- function(assumptions, mortality_tbl, severity_tbl, 
       summary$avg_event_severity_m,
       summary$avg_productions_capped,
       summary$annual_claim_frequency,
-      summary$qx_used,
+      summary$total_expected_events,
       fit$distribution
     )
   )
