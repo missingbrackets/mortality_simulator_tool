@@ -59,7 +59,8 @@ reattach_layers <- function(lyr) {
   lyr
 }
 
-mod_sensitivity_server <- function(id, base_assumptions, severity_tbl, selected_fit, layers) {
+mod_sensitivity_server <- function(id, base_assumptions, severity_tbl, selected_fit, layers,
+                                   risk_schedule = reactive(NULL)) {
   moduleServer(id, function(input, output, session) {
     sens_data       <- reactiveVal(NULL)
     sens_status_txt <- reactiveVal("")
@@ -75,6 +76,7 @@ mod_sensitivity_server <- function(id, base_assumptions, severity_tbl, selected_
       fit          <- selected_fit()
       sev_tbl      <- severity_tbl()
       layers_tbl   <- layers()
+      rsched       <- risk_schedule()
       pct          <- input$pct_change / 100
       n_sims       <- input$sens_sims
       metric       <- input$output_metric
@@ -93,7 +95,7 @@ mod_sensitivity_server <- function(id, base_assumptions, severity_tbl, selected_
       withProgress(message = "Sensitivity analysis", value = 0, {
         base_a        <- assumptions
         base_a$n_sims <- n_sims
-        base_res      <- simulate_portfolio_losses(base_a, sev_tbl, fit, layers_tbl)
+        base_res      <- simulate_portfolio_losses(base_a, sev_tbl, fit, layers_tbl, rsched)
         base_val      <- extract_metric(base_res, metric)
         incProgress(1 / (length(params) + 1), detail = "Base scenario done")
 
@@ -133,7 +135,7 @@ mod_sensitivity_server <- function(id, base_assumptions, severity_tbl, selected_
             }
 
             tryCatch({
-              res <- simulate_portfolio_losses(a, sev_tbl, fit, lyr)
+              res <- simulate_portfolio_losses(a, sev_tbl, fit, lyr, rsched)
               list(input_val = input_val, result = extract_metric(res, metric))
             }, error = function(e) list(input_val = input_val, result = NA_real_))
           }
