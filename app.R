@@ -132,6 +132,9 @@ ui <- fluidPage(
           br(),
           plotOutput("layer_dist_plot", height = "320px"),
           br(),
+          h4("Loss by reinsurance layer"),
+          DTOutput("layer_summary_table"),
+          br(),
           DTOutput("summary_table"),
           br(),
           DTOutput("distribution_check_table")
@@ -522,6 +525,24 @@ server <- function(input, output, session) {
       geom_histogram(bins = 50) +
       labs(title = "Distribution of loss to our layer", x = "Our layer loss (USD m)", y = "Simulation count") +
       theme_minimal(base_size = 13)
+  })
+
+  output$layer_summary_table <- renderDT({
+    req(sim_results())
+    df <- sim_results()$layer_summary %>%
+      transmute(
+        Layer           = layer,
+        Basis           = basis,
+        `Our layer`     = ifelse(our_layer, "Yes", ""),
+        `Attachment (USD m)` = attachment_m,
+        `Limit (USD m)` = limit_m,
+        `Expected loss (USD m)` = expected_loss_m,
+        `Prob. penetrated`      = prob_hit
+      )
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", scrollX = TRUE, autoWidth = TRUE, ordering = FALSE)) %>%
+      formatRound(c("Attachment (USD m)", "Limit (USD m)", "Expected loss (USD m)"), digits = 2) %>%
+      formatPercentage("Prob. penetrated", digits = 1)
   })
 
   output$summary_table <- renderDT({

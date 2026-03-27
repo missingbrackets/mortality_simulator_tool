@@ -100,9 +100,10 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
       ground_up_m = cast_loss_m + attritional_loss_m
     )
 
-  layer_results <- apply_layers_flex(simulation_summary$ground_up_m, event_detail, layers)
+  layer_out     <- apply_layers_flex(simulation_summary$ground_up_m, event_detail, layers)
+  layer_summary <- layer_out$layer_summary
 
-  simulation_summary <- bind_cols(simulation_summary, layer_results) %>%
+  simulation_summary <- bind_cols(simulation_summary, layer_out$sim_losses) %>%
     select(
       sim_id, cast_event_count, productions_with_events, productions_capped,
       cast_raw_loss_m, cast_loss_m, attritional_loss_m, ground_up_m,
@@ -160,6 +161,7 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
     event_detail = event_detail,
     summary = summary,
     summary_table = summary_table,
+    layer_summary = layer_summary,
     claims_history = claims_history
   )
 }
