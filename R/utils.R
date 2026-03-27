@@ -225,6 +225,31 @@ apply_layers <- function(ground_up_m, sir_m, primary_limit_m, our_limit_m) {
   )
 }
 
+# Flexible N-layer version.
+# layers_tbl must have columns: attachment_m, limit_m, is_our_layer
+# (as produced by mod_reinsurance_server$layers)
+apply_layers_flex <- function(ground_up_m, layers_tbl) {
+  n       <- length(ground_up_m)
+  n_layers <- nrow(layers_tbl)
+
+  layer_mat <- matrix(0, nrow = n, ncol = n_layers)
+  for (i in seq_len(n_layers)) {
+    layer_mat[, i] <- pmin(
+      pmax(ground_up_m - layers_tbl$attachment_m[i], 0),
+      layers_tbl$limit_m[i]
+    )
+  }
+
+  our_idx   <- which(layers_tbl$is_our_layer)
+  other_idx <- setdiff(seq_len(n_layers)[-1], our_idx)   # non-retention, non-our
+
+  tibble(
+    sir_eroded_m     = layer_mat[, 1],
+    primary_loss_m   = if (length(other_idx) > 0) rowSums(layer_mat[, other_idx, drop = FALSE]) else rep(0, n),
+    our_layer_loss_m = if (length(our_idx)   > 0) rowSums(layer_mat[, our_idx,   drop = FALSE]) else rep(0, n)
+  )
+}
+
 style_dt <- function(dt) {
   dt %>%
     formatStyle(

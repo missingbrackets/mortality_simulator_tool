@@ -15,6 +15,7 @@ source("R/simulation_engine.R")
 source("R/export.R")
 source("R/mod_curve_fit.R")
 source("R/mod_mortality_calc.R")
+source("R/mod_reinsurance.R")
 source("R/mod_sensitivity.R")
 
 metric_card <- function(title, value) {
@@ -34,10 +35,9 @@ ui <- fluidPage(
     sidebarPanel(
       width = 4,
       h4("Core assumptions"),
-      numericInput("n_productions", "Number of productions", value = 65, min = 1, step = 1),
       dateInput("inception_date", "Inception date", value = "2026-04-01", format = "yyyy-mm-dd"),
       numericInput("exposure_years", "Exposure period (years)", value = 4, min = 0.25, step = 0.25),
-      numericInput("production_duration_days", "Average production duration (days)", value = 180, min = 1, step = 1),
+      helpText("Number of productions and production duration are set in the Mortality Calculator tab."),
 
       tags$hr(),
       h4("Film budgets"),
@@ -48,15 +48,16 @@ ui <- fluidPage(
 
       tags$hr(),
       h4("Frequency"),
-      numericInput("annual_claim_freq", "Expected annual cast-event frequency", value = 0.12, min = 0, step = 0.01),
+      radioButtons(
+        "freq_basis",
+        "Frequency basis",
+        choices  = c("Per year" = "per_year", "Per production" = "per_production"),
+        selected = "per_year",
+        inline   = TRUE
+      ),
+      uiOutput("freq_input_ui"),
       uiOutput("freq_info"),
-      helpText("Use the Mortality Calculator tab to derive this from actor mortality assumptions."),
-
-      tags$hr(),
-      h4("Layer structure"),
-      numericInput("sir", "SIR attachment (USD m)", value = 75, min = 0, step = 1),
-      numericInput("primary_limit", "Primary limit (USD m)", value = 100, min = 0, step = 1),
-      numericInput("our_limit", "Our layer limit (USD m)", value = 50, min = 0, step = 1),
+      helpText("Use the Mortality Calculator tab to derive frequency from actor mortality assumptions."),
 
       tags$hr(),
       h4("Attritional"),
@@ -68,9 +69,9 @@ ui <- fluidPage(
       radioButtons(
         "severity_rp_type",
         "Return period supplied as",
-        choices = c("Years" = "years", "Claims" = "claims"),
+        choices  = c("Years" = "years", "Claims" = "claims"),
         selected = "years",
-        inline = TRUE
+        inline   = TRUE
       ),
 
       tags$hr(),
@@ -94,24 +95,11 @@ ui <- fluidPage(
           fileInput("claims_history_file", "Upload CSV", accept = c(".csv")),
           DTOutput("claims_history_preview"),
           br(),
-          fluidRow(
-            column(
-              6,
-              h4("Mortality table"),
-              p("Required columns: Birth Year, Age, qx, lx"),
-              fileInput("mortality_file", "Upload mortality CSV", accept = c(".csv")),
-              uiOutput("mortality_status"),
-              DTOutput("mortality_preview")
-            ),
-            column(
-              6,
-              h4("Cast death/injury severity table"),
-              p("Required columns: loss_m and one of return_period / return_period_years / return_period_claims"),
-              fileInput("severity_file", "Upload severity CSV", accept = c(".csv")),
-              uiOutput("severity_status"),
-              DTOutput("severity_preview")
-            )
-          )
+          h4("Severity table"),
+          p("Required columns: loss_m and one of return_period / return_period_years / return_period_claims"),
+          fileInput("severity_file", "Upload severity CSV", accept = c(".csv")),
+          uiOutput("severity_status"),
+          DTOutput("severity_preview")
         ),
         tabPanel(
           "Curve fitting",
@@ -122,6 +110,11 @@ ui <- fluidPage(
           "Mortality calculator",
           br(),
           mod_mortality_calc_ui("mort_calc")
+        ),
+        tabPanel(
+          "Reinsurance structure",
+          br(),
+          mod_reinsurance_ui("reinsurance")
         ),
         tabPanel(
           "Results",
@@ -164,56 +157,85 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   claims_history_data <- reactiveVal(tibble(year = integer(), aggregate_loss_m = numeric()))
-  mortality_data <- reactiveVal(clean_mortality_table(default_mortality_table()))
-  severity_raw_data <- reactiveVal(default_severity_table())
+  mortality_data      <- reactiveVal(clean_mortality_table(default_mortality_table()))
+  severity_raw_data   <- reactiveVal(default_severity_table())
 
-  sim_results <- reactiveVal(NULL)
-  run_status_txt <- reactiveVal("No model run yet.")
-  mortality_status_txt <- reactiveVal("Using default mortality table.")
+  sim_results      <- reactiveVal(NULL)
+  run_status_txt   <- reactiveVal("No model run yet.")
   severity_status_txt <- reactiveVal("Using default severity table.")
 
+  # --- Modules (initialised before assumptions_reactive so reactives resolve lazily) ---
+  mort_calc <- mod_mortality_calc_server(
+    "mort_calc",
+    exposure_years = reactive(input$exposure_years),
+    mortality_data = mortality_data
+  )
+
+  observeEvent(mort_calc$use_freq_trigger(), {
+    updateNumericInput(session, "annual_claim_freq", value = round(mort_calc$computed_freq(), 4))
+    updateRadioButtons(session, "freq_basis", selected = "per_year")
+  })
+
+  reinsurance <- mod_reinsurance_server("reinsurance")
+
+  # --- Dynamic frequency input (label changes with basis) ---
+  output$freq_input_ui <- renderUI({
+    label <- if (input$freq_basis == "per_production") {
+      "Expected claims per production"
+    } else {
+      "Expected claims per year"
+    }
+    numericInput("annual_claim_freq", label, value = 0.12, min = 0, step = 0.01)
+  })
+
+  output$freq_info <- renderUI({
+    req(input$annual_claim_freq)
+    n_prods <- mort_calc$n_productions()
+    if (input$freq_basis == "per_production") {
+      total <- input$annual_claim_freq * n_prods
+      tags$small(style = "color:#555;",
+        sprintf("Total expected events: %.2f  (%d productions × %.4f)",
+                total, n_prods, input$annual_claim_freq))
+    } else {
+      total <- input$annual_claim_freq * input$exposure_years
+      tags$small(style = "color:#555;",
+        sprintf("Total expected events over %.1f-year exposure: %.2f",
+                input$exposure_years, total))
+    }
+  })
+
+  # --- Core assumptions list ---
   assumptions_reactive <- reactive({
+    req(input$annual_claim_freq)
     list(
-      n_productions = input$n_productions,
-      inception_date = as.Date(input$inception_date),
-      exposure_years = input$exposure_years,
-      production_duration_days = input$production_duration_days,
-      total_budget_m = input$total_budget_m,
-      min_budget_m = input$min_budget_m,
-      max_budget_m = input$max_budget_m,
-      sir_m = input$sir,
-      primary_limit_m = input$primary_limit,
-      our_limit_m = input$our_limit,
-      avg_attritional_m = input$avg_attritional,
-      attritional_cv = input$attritional_cv,
-      annual_claim_freq = input$annual_claim_freq,
-      n_sims = input$n_sims,
-      seed = input$seed
+      n_productions            = mort_calc$n_productions(),
+      inception_date           = as.Date(input$inception_date),
+      exposure_years           = input$exposure_years,
+      production_duration_days = mort_calc$production_duration_days(),
+      total_budget_m           = input$total_budget_m,
+      min_budget_m             = input$min_budget_m,
+      max_budget_m             = input$max_budget_m,
+      avg_attritional_m        = input$avg_attritional,
+      attritional_cv           = input$attritional_cv,
+      annual_claim_freq        = input$annual_claim_freq,
+      freq_basis               = input$freq_basis,
+      n_sims                   = input$n_sims,
+      seed                     = input$seed
     )
   })
 
-  annual_claim_freq <- reactive({
-    input$annual_claim_freq
-  })
+  annual_claim_freq <- reactive(input$annual_claim_freq)
 
   severity_tbl <- reactive({
     standardize_severity_table(
-      severity_tbl_raw = severity_raw_data(),
-      input_type = input$severity_rp_type,
+      severity_tbl_raw       = severity_raw_data(),
+      input_type             = input$severity_rp_type,
       annual_claim_frequency = annual_claim_freq()
     )
   })
 
-  output$run_status <- renderText(run_status_txt())
-  output$mortality_status <- renderUI(tags$small(style = "color:#555;", mortality_status_txt()))
+  output$run_status     <- renderText(run_status_txt())
   output$severity_status <- renderUI(tags$small(style = "color:#555;", severity_status_txt()))
-  output$freq_info <- renderUI({
-    total_events <- input$annual_claim_freq * input$exposure_years
-    tags$small(
-      style = "color:#555;",
-      sprintf("Total expected events over %.1f-year exposure: %.2f", input$exposure_years, total_events)
-    )
-  })
 
   # --- File uploads ---
   observeEvent(input$claims_history_file, {
@@ -226,23 +248,10 @@ server <- function(input, output, session) {
     })
   })
 
-  observeEvent(input$mortality_file, {
-    req(input$mortality_file$datapath)
-    tryCatch({
-      clean_df <- clean_mortality_table(read_csv(input$mortality_file$datapath, show_col_types = FALSE))
-      mortality_data(clean_df)
-      mortality_status_txt(sprintf("Uploaded mortality table loaded: %s rows.", nrow(clean_df)))
-      showNotification("Mortality table uploaded.", type = "message")
-    }, error = function(e) {
-      mortality_status_txt("Using previous/default mortality table. Upload failed.")
-      showNotification(paste("Mortality upload failed:", e$message), type = "error", duration = NULL)
-    })
-  })
-
   observeEvent(input$severity_file, {
     req(input$severity_file$datapath)
     tryCatch({
-      raw_df <- read_csv(input$severity_file$datapath, show_col_types = FALSE)
+      raw_df   <- read_csv(input$severity_file$datapath, show_col_types = FALSE)
       clean_df <- clean_severity_table(raw_df)
       severity_raw_data(raw_df)
       severity_status_txt(sprintf("Uploaded severity table loaded: %s rows.", nrow(clean_df)))
@@ -260,42 +269,28 @@ server <- function(input, output, session) {
     style_dt(dt)
   })
 
-  output$mortality_preview <- renderDT({
-    datatable(mortality_data(), options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE), rownames = FALSE) %>%
-      formatRound("qx", digits = 6) %>%
-      formatRound("lx", digits = 0)
-  })
-
   output$severity_preview <- renderDT({
     datatable(
-      severity_tbl() %>% select(loss_m, input_type, input_return_period, return_period_years, return_period_claims, exceed_prob_fit, percentile),
-      options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE),
+      severity_tbl() %>% select(loss_m, input_type, input_return_period,
+                                return_period_years, return_period_claims,
+                                exceed_prob_fit, percentile),
+      options  = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE),
       rownames = FALSE
     ) %>%
       formatRound(c("loss_m", "input_return_period", "return_period_years", "return_period_claims"), digits = 2) %>%
       formatRound(c("exceed_prob_fit", "percentile"), digits = 4)
   })
 
-  # --- Modules ---
+  # --- Curve fit module ---
   curve_fit <- mod_curve_fit_server("curve_fit", severity_tbl = severity_tbl)
 
-  mort_calc <- mod_mortality_calc_server(
-    "mort_calc",
-    n_productions = reactive(input$n_productions),
-    production_duration_days = reactive(input$production_duration_days),
-    exposure_years = reactive(input$exposure_years),
-    mortality_data = mortality_data
-  )
-
-  observeEvent(mort_calc$use_freq_trigger(), {
-    updateNumericInput(session, "annual_claim_freq", value = round(mort_calc$computed_freq(), 4))
-  })
-
+  # --- Sensitivity module ---
   mod_sensitivity_server(
     "sensitivity",
     base_assumptions = assumptions_reactive,
-    severity_tbl = severity_tbl,
-    selected_fit = reactive(curve_fit$selected_fit())
+    severity_tbl     = severity_tbl,
+    selected_fit     = reactive(curve_fit$selected_fit()),
+    layers           = reinsurance$layers
   )
 
   # --- Model run ---
@@ -307,10 +302,10 @@ server <- function(input, output, session) {
       incProgress(0.10, detail = "Validating inputs")
       isolate({
         assign_production_budgets(
-          n = input$n_productions,
+          n              = mort_calc$n_productions(),
           total_budget_m = input$total_budget_m,
-          min_budget_m = input$min_budget_m,
-          max_budget_m = input$max_budget_m
+          min_budget_m   = input$min_budget_m,
+          max_budget_m   = input$max_budget_m
         )
       })
 
@@ -320,9 +315,10 @@ server <- function(input, output, session) {
 
       incProgress(0.55, detail = "Simulating portfolio")
       res <- simulate_portfolio_losses(
-        assumptions = assumptions_reactive(),
-        severity_tbl = severity_tbl(),
-        fit = fit_obj,
+        assumptions    = assumptions_reactive(),
+        severity_tbl   = severity_tbl(),
+        fit            = fit_obj,
+        layers         = reinsurance$layers(),
         claims_history = claims_history_data()
       )
 
@@ -349,7 +345,7 @@ server <- function(input, output, session) {
   })
   output$vb_avg_events <- renderUI({
     req(sim_results())
-    metric_card("Average cast events", number(sim_results()$summary$avg_cast_events, accuracy = 0.001))
+    metric_card("Average events", number(sim_results()$summary$avg_cast_events, accuracy = 0.001))
   })
   output$vb_avg_sev <- renderUI({
     req(sim_results())
@@ -402,9 +398,9 @@ server <- function(input, output, session) {
   })
 
   output$download_excel <- downloadHandler(
-    filename = function() paste0("film_contingency_pricing_", Sys.Date(), ".xlsx"),
+    filename    = function() paste0("film_contingency_pricing_", Sys.Date(), ".xlsx"),
     contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    content = function(file) {
+    content     = function(file) {
       req(sim_results())
       fit_tbl <- tryCatch(isolate(curve_fit$comparison_table()), error = function(e) data.frame(note = e$message))
       export_simulation_workbook(results = sim_results(), fit_comparison = fit_tbl, path = file)
