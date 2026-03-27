@@ -2,7 +2,7 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 
-simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, claims_history = NULL) {
+simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, claims_history = NULL) {
   set.seed(assumptions$seed)
 
   production_schedule <- make_production_schedule(
@@ -20,7 +20,11 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, claims_his
       )
     )
 
-  total_expected_events <- assumptions$annual_claim_freq * assumptions$exposure_years
+  total_expected_events <- if (isTRUE(assumptions$freq_basis == "per_production")) {
+    assumptions$annual_claim_freq * assumptions$n_productions
+  } else {
+    assumptions$annual_claim_freq * assumptions$exposure_years
+  }
   n_prods <- nrow(production_schedule)
   budgets <- production_schedule$budget_m
 
@@ -96,14 +100,9 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, claims_his
       ground_up_m = cast_loss_m + attritional_loss_m
     )
 
-  layers <- apply_layers(
-    ground_up_m = simulation_summary$ground_up_m,
-    sir_m = assumptions$sir_m,
-    primary_limit_m = assumptions$primary_limit_m,
-    our_limit_m = assumptions$our_limit_m
-  )
+  layer_results <- apply_layers_flex(simulation_summary$ground_up_m, layers)
 
-  simulation_summary <- bind_cols(simulation_summary, layers) %>%
+  simulation_summary <- bind_cols(simulation_summary, layer_results) %>%
     select(
       sim_id, cast_event_count, productions_with_events, productions_capped,
       cast_raw_loss_m, cast_loss_m, attritional_loss_m, ground_up_m,
