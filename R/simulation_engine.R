@@ -100,7 +100,7 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
       ground_up_m = cast_loss_m + attritional_loss_m
     )
 
-  layer_results <- apply_layers_flex(simulation_summary$ground_up_m, layers)
+  layer_results <- apply_layers_flex(simulation_summary$ground_up_m, event_detail, layers)
 
   simulation_summary <- bind_cols(simulation_summary, layer_results) %>%
     select(
