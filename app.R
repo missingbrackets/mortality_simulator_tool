@@ -239,19 +239,34 @@ ui <- fluidPage(
             tags$hr(),
             h4("7. Reinsurance layer structure"),
             p("The reinsurance structure is defined in the ", strong("Reinsurance Structure tab"), " as an ordered
-              stack of layers. Each layer has a name, a limit, and optionally a flag marking it as 'our layer'
-              (the layer whose loss is the primary pricing metric)."),
-            p("Attachment points are computed automatically as the cumulative sum of all layers beneath:"),
+              stack of layers. Each layer has a name, a limit, an optional 'our layer' tag, and a ", strong("basis"), "."),
+            p("Attachment points are computed automatically as the cumulative sum of all limits beneath:"),
             tags$ul(
               tags$li("Layer 1 (retention/SIR): attaches at 0, exhausts at its limit."),
               tags$li("Layer 2: attaches where Layer 1 exhausts, and so on.")
             ),
-            p("For each simulation, the loss to each layer is:"),
+            h5("Occurrence basis (standard XL)"),
+            p("Each individual large-loss event is tested against the layer independently:"),
             tags$blockquote(
               style = "background:#f8f9fa; border-left:4px solid #18bc9c; padding:8px 16px; font-family:monospace;",
-              "layer_loss = min( max(ground_up − attachment, 0), limit )"
+              "event_layer_loss = min( max(event_severity − attachment, 0), limit )",
+              tags$br(),
+              "sim_layer_loss = Σ event_layer_loss  across all events in that simulation"
             ),
-            p("The three reported aggregates are:"),
+            p("Multiple events can each penetrate the layer in the same period. Attritional losses are a single
+              aggregate number per simulation and do not appear as individual events, so they do not
+              contribute to occurrence layer losses (consistent with attritional claims being too small to
+              individually breach the SIR)."),
+            h5("Aggregate basis (stop-loss / aggregate XL)"),
+            p("The total cumulative loss for the period erodes the layer once:"),
+            tags$blockquote(
+              style = "background:#f8f9fa; border-left:4px solid #18bc9c; padding:8px 16px; font-family:monospace;",
+              "sim_layer_loss = min( max(ground_up_m − attachment, 0), limit )"
+            ),
+            p("Here ground_up_m = capped large-loss total + attritional. Attritional losses therefore
+              contribute to the erosion of aggregate layers, which is the correct treatment for
+              aggregate stop-loss covers."),
+            p("The three reported output aggregates are:"),
             tags$ul(
               tags$li(strong("SIR erosion:"), " loss to the first (retention) layer."),
               tags$li(strong("Primary loss:"), " sum of losses to all layers that are neither the retention nor tagged as our layer."),
