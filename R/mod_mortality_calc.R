@@ -7,16 +7,12 @@ mod_mortality_calc_ui <- function(id) {
     fluidRow(
       column(
         4,
-        h4("Portfolio structure"),
-        numericInput(ns("n_productions"), "Number of productions", value = 65, min = 1, step = 1),
-        numericInput(ns("production_duration_days"), "Average production duration (days)", value = 180, min = 1, step = 1),
-        tags$hr(),
         h4("Mortality-based frequency calculator"),
         p("Derive an annual claim frequency from actor mortality assumptions, then push it to the sidebar."),
+        helpText("Number of risks and risk duration are read from the sidebar."),
         numericInput(ns("key_actor_age"), "Assumed key actor age", value = 45, min = 0, max = 110, step = 1),
-        numericInput(ns("avg_key_actors"), "Average key actors per production", value = 4, min = 1, step = 1),
+        numericInput(ns("avg_key_actors"), "Average key actors per risk", value = 4, min = 1, step = 1),
         numericInput(ns("injury_load"), "Injury rate multiple to mortality", value = 1.5, min = 0, step = 0.1),
-        helpText("Exposure period is read from the main sidebar."),
         tags$hr(),
         verbatimTextOutput(ns("freq_result")),
         actionButton(ns("use_freq"), "Use this frequency", class = "btn-primary mt-2")
@@ -36,7 +32,8 @@ mod_mortality_calc_ui <- function(id) {
   )
 }
 
-mod_mortality_calc_server <- function(id, exposure_years, mortality_data) {
+mod_mortality_calc_server <- function(id, n_productions, production_duration_days,
+                                      exposure_years, mortality_data) {
   moduleServer(id, function(input, output, session) {
 
     mortality_status_txt <- reactiveVal("Using default/previously loaded mortality table.")
@@ -58,24 +55,25 @@ mod_mortality_calc_server <- function(id, exposure_years, mortality_data) {
 
     computed <- reactive({
       req(input$key_actor_age, input$avg_key_actors, input$injury_load)
-      req(input$n_productions, input$production_duration_days)
-      mort <- mortality_data()
+      mort     <- mortality_data()
       req(mort, nrow(mort) > 0)
-      exp_years <- exposure_years()
-      req(exp_years)
+      n_prods  <- n_productions()
+      dur_days <- production_duration_days()
+      exp_yrs  <- exposure_years()
+      req(n_prods, dur_days, exp_yrs)
 
       probs <- per_actor_event_probs(
         age                    = input$key_actor_age,
         mortality_tbl          = mort,
-        production_duration_days = input$production_duration_days,
+        production_duration_days = dur_days,
         injury_load            = input$injury_load
       )
 
-      n_actors_total    <- input$n_productions * input$avg_key_actors
+      n_actors_total    <- n_prods * input$avg_key_actors
       expected_deaths   <- n_actors_total * probs$death_prob
       expected_injuries <- n_actors_total * probs$injury_prob
       expected_total    <- expected_deaths + expected_injuries
-      annual_freq       <- pmax(expected_total / exp_years, 1e-8)
+      annual_freq       <- pmax(expected_total / exp_yrs, 1e-8)
 
       list(
         annual_freq       = annual_freq,
@@ -101,8 +99,8 @@ mod_mortality_calc_server <- function(id, exposure_years, mortality_data) {
         Step = c(
           "Annual death probability (qx)",
           "Annual injury probability (qx x injury load)",
-          "Per-production death probability",
-          "Per-production injury probability",
+          "Per-risk death probability (over risk duration)",
+          "Per-risk injury probability (over risk duration)",
           "Total key actors across portfolio",
           "Expected death events (full term)",
           "Expected injury events (full term)",
@@ -132,10 +130,8 @@ mod_mortality_calc_server <- function(id, exposure_years, mortality_data) {
     })
 
     list(
-      computed_freq          = reactive(computed()$annual_freq),
-      use_freq_trigger       = reactive(input$use_freq),
-      n_productions          = reactive(input$n_productions),
-      production_duration_days = reactive(input$production_duration_days)
+      computed_freq    = reactive(computed()$annual_freq),
+      use_freq_trigger = reactive(input$use_freq)
     )
   })
 }

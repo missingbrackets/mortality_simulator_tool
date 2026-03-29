@@ -30,28 +30,30 @@ ui <- fluidPage(
   tags$head(
     tags$style(HTML("table.dataTable tbody td { white-space: nowrap; } .shiny-notification { width: 420px; }"))
   ),
-  titlePanel("Contingency Film Production Risk Pricing Tool"),
+  titlePanel("Risk Pricing Tool — Frequency Severity Model"),
   sidebarLayout(
     sidebarPanel(
       width = 4,
       h4("Core assumptions"),
       dateInput("inception_date", "Inception date", value = "2026-04-01", format = "yyyy-mm-dd"),
       numericInput("exposure_years", "Exposure period (years)", value = 4, min = 0.25, step = 0.25),
-      helpText("Number of productions and production duration are set in the Mortality Calculator tab."),
 
       tags$hr(),
-      h4("Film budgets"),
-      numericInput("total_budget_m", "Total budget across all films (USD m)", value = 3000, min = 1, step = 1),
-      numericInput("min_budget_m", "Minimum individual film budget (USD m)", value = 20, min = 0.1, step = 0.1),
-      numericInput("max_budget_m", "Maximum individual film budget (USD m)", value = 100, min = 0.1, step = 0.1),
-      helpText("Budgets are randomly assigned between min and max, forced to sum to the total."),
+      h4("Portfolio structure"),
+      numericInput("n_productions", "Number of risks / exposure units", value = 65, min = 1, step = 1),
+      numericInput("production_duration_days", "Average risk duration (days)", value = 180, min = 1, step = 1),
+      helpText("If an exposure schedule is uploaded in Data Inputs, the risk count is taken from that file instead."),
+
+      tags$hr(),
+      h4("Per-risk exposure limits"),
+      uiOutput("per_risk_limits_ui"),
 
       tags$hr(),
       h4("Frequency"),
       radioButtons(
         "freq_basis",
         "Frequency basis",
-        choices  = c("Per year" = "per_year", "Per production" = "per_production"),
+        choices  = c("Per year" = "per_year", "Per risk" = "per_production"),
         selected = "per_year",
         inline   = TRUE
       ),
@@ -90,16 +92,24 @@ ui <- fluidPage(
         tabPanel(
           "Data inputs",
           br(),
-          h4("Aggregate claims history (last 5 years)"),
-          p("Optional; used for context and benchmarking only."),
-          fileInput("claims_history_file", "Upload CSV", accept = c(".csv")),
-          DTOutput("claims_history_preview"),
+          h4("Exposure schedule"),
+          p("Optional. Upload a CSV with one row per risk. When provided, overrides the sidebar risk count and per-risk limit inputs."),
+          p(tags$b("Required column:"), " limit_m (aliases: limit, sum_insured, budget_m, tsi_m)"),
+          p(tags$b("Optional columns:"), " name, start_date, end_date (if omitted, dates are spread evenly using sidebar inputs)"),
+          fileInput("risk_schedule_file", "Upload exposure schedule CSV", accept = c(".csv")),
+          uiOutput("risk_schedule_status"),
+          DTOutput("risk_schedule_preview"),
           br(),
           h4("Severity table"),
           p("Required columns: loss_m and one of return_period / return_period_years / return_period_claims"),
           fileInput("severity_file", "Upload severity CSV", accept = c(".csv")),
           uiOutput("severity_status"),
-          DTOutput("severity_preview")
+          DTOutput("severity_preview"),
+          br(),
+          h4("Aggregate claims history (last 5 years)"),
+          p("Optional; used for context and benchmarking only."),
+          fileInput("claims_history_file", "Upload CSV", accept = c(".csv")),
+          DTOutput("claims_history_preview")
         ),
         tabPanel(
           "Curve fitting",
@@ -131,6 +141,9 @@ ui <- fluidPage(
           ),
           br(),
           plotOutput("layer_dist_plot", height = "320px"),
+          br(),
+          h4("Loss by reinsurance layer"),
+          DTOutput("layer_summary_table"),
           br(),
           DTOutput("summary_table"),
           br(),
@@ -319,16 +332,20 @@ server <- function(input, output, session) {
   claims_history_data <- reactiveVal(tibble(year = integer(), aggregate_loss_m = numeric()))
   mortality_data      <- reactiveVal(clean_mortality_table(default_mortality_table()))
   severity_raw_data   <- reactiveVal(default_severity_table())
+  risk_schedule_data  <- reactiveVal(NULL)
 
-  sim_results      <- reactiveVal(NULL)
-  run_status_txt   <- reactiveVal("No model run yet.")
-  severity_status_txt <- reactiveVal("Using default severity table.")
+  sim_results           <- reactiveVal(NULL)
+  run_status_txt        <- reactiveVal("No model run yet.")
+  severity_status_txt   <- reactiveVal("Using default severity table.")
+  risk_schedule_status_txt <- reactiveVal("")
 
-  # --- Modules (initialised before assumptions_reactive so reactives resolve lazily) ---
+  # --- Modules ---
   mort_calc <- mod_mortality_calc_server(
     "mort_calc",
-    exposure_years = reactive(input$exposure_years),
-    mortality_data = mortality_data
+    n_productions            = reactive(input$n_productions),
+    production_duration_days = reactive(input$production_duration_days),
+    exposure_years           = reactive(input$exposure_years),
+    mortality_data           = mortality_data
   )
 
   observeEvent(mort_calc$use_freq_trigger(), {
@@ -338,43 +355,61 @@ server <- function(input, output, session) {
 
   reinsurance <- mod_reinsurance_server("reinsurance")
 
-  # --- Dynamic frequency input (label changes with basis) ---
-  output$freq_input_ui <- renderUI({
-    label <- if (input$freq_basis == "per_production") {
-      "Expected claims per production"
+  # --- Sidebar: per-risk limit section (conditional on schedule upload) ---
+  output$per_risk_limits_ui <- renderUI({
+    sched <- risk_schedule_data()
+    if (!is.null(sched)) {
+      div(class = "alert alert-info p-2 mb-0",
+        tags$small(
+          sprintf("%d risks loaded from schedule. Total limit: $%.0fm  |  Avg: $%.0fm  |  Min: $%.0fm  |  Max: $%.0fm",
+                  nrow(sched), sum(sched$limit_m), mean(sched$limit_m),
+                  min(sched$limit_m), max(sched$limit_m))
+        )
+      )
     } else {
-      "Expected claims per year"
+      tagList(
+        numericInput("total_budget_m", "Total limit across all risks (USD m)", value = 3000, min = 1, step = 1),
+        numericInput("min_budget_m",   "Minimum per-risk limit (USD m)",       value = 20,   min = 0.1, step = 0.1),
+        numericInput("max_budget_m",   "Maximum per-risk limit (USD m)",       value = 100,  min = 0.1, step = 0.1),
+        helpText("Limits randomly assigned between min and max, forced to sum to total.")
+      )
     }
+  })
+
+  # --- Dynamic frequency input ---
+  output$freq_input_ui <- renderUI({
+    label <- if (isTRUE(input$freq_basis == "per_production")) "Expected claims per risk" else "Expected claims per year"
     numericInput("annual_claim_freq", label, value = 0.12, min = 0, step = 0.01)
   })
 
   output$freq_info <- renderUI({
     req(input$annual_claim_freq)
-    n_prods <- mort_calc$n_productions()
-    if (input$freq_basis == "per_production") {
+    sched   <- risk_schedule_data()
+    n_prods <- if (!is.null(sched)) nrow(sched) else (input$n_productions %||% 65)
+    if (isTRUE(input$freq_basis == "per_production")) {
       total <- input$annual_claim_freq * n_prods
       tags$small(style = "color:#555;",
-        sprintf("Total expected events: %.2f  (%d productions × %.4f)",
-                total, n_prods, input$annual_claim_freq))
+        sprintf("Total expected events: %.2f  (%d risks × %.4f)", total, n_prods, input$annual_claim_freq))
     } else {
       total <- input$annual_claim_freq * input$exposure_years
       tags$small(style = "color:#555;",
-        sprintf("Total expected events over %.1f-year exposure: %.2f",
-                input$exposure_years, total))
+        sprintf("Total expected events over %.1f-year exposure: %.2f", input$exposure_years, total))
     }
   })
 
-  # --- Core assumptions list ---
+  # --- Core assumptions ---
   assumptions_reactive <- reactive({
     req(input$annual_claim_freq)
+    sched   <- risk_schedule_data()
+    n_prods <- if (!is.null(sched)) nrow(sched) else (input$n_productions %||% 65)
     list(
-      n_productions            = mort_calc$n_productions(),
+      n_productions            = n_prods,
       inception_date           = as.Date(input$inception_date),
       exposure_years           = input$exposure_years,
-      production_duration_days = mort_calc$production_duration_days(),
-      total_budget_m           = input$total_budget_m,
-      min_budget_m             = input$min_budget_m,
-      max_budget_m             = input$max_budget_m,
+      production_duration_days = input$production_duration_days %||% 180,
+      total_budget_m           = input$total_budget_m %||% 3000,
+      min_budget_m             = input$min_budget_m   %||% 20,
+      max_budget_m             = input$max_budget_m   %||% 100,
       avg_attritional_m        = input$avg_attritional,
       attritional_cv           = input$attritional_cv,
       annual_claim_freq        = input$annual_claim_freq,
@@ -394,10 +429,28 @@ server <- function(input, output, session) {
     )
   })
 
-  output$run_status     <- renderText(run_status_txt())
+  output$run_status      <- renderText(run_status_txt())
   output$severity_status <- renderUI(tags$small(style = "color:#555;", severity_status_txt()))
+  output$risk_schedule_status <- renderUI(tags$small(style = "color:#555;", risk_schedule_status_txt()))
 
   # --- File uploads ---
+  observeEvent(input$risk_schedule_file, {
+    req(input$risk_schedule_file$datapath)
+    tryCatch({
+      raw  <- read_csv(input$risk_schedule_file$datapath, show_col_types = FALSE)
+      sched <- clean_risk_schedule(raw)
+      risk_schedule_data(sched)
+      risk_schedule_status_txt(sprintf(
+        "Schedule loaded: %d risks, total limit $%.0fm, avg $%.0fm.",
+        nrow(sched), sum(sched$limit_m), mean(sched$limit_m)
+      ))
+      showNotification(sprintf("Exposure schedule loaded: %d risks.", nrow(sched)), type = "message")
+    }, error = function(e) {
+      risk_schedule_status_txt(paste("Upload failed:", e$message))
+      showNotification(paste("Schedule upload failed:", e$message), type = "error", duration = NULL)
+    })
+  })
+
   observeEvent(input$claims_history_file, {
     req(input$claims_history_file$datapath)
     tryCatch({
@@ -423,6 +476,13 @@ server <- function(input, output, session) {
   })
 
   # --- Data preview tables ---
+  output$risk_schedule_preview <- renderDT({
+    req(risk_schedule_data())
+    df <- risk_schedule_data()
+    dt <- datatable(df, options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE), rownames = FALSE)
+    dt %>% formatRound("limit_m", digits = 1)
+  })
+
   output$claims_history_preview <- renderDT({
     dt <- datatable(claims_history_data(), options = list(pageLength = 5, scrollX = TRUE, autoWidth = TRUE), rownames = FALSE)
     if ("aggregate_loss_m" %in% names(claims_history_data())) dt <- dt %>% formatRound("aggregate_loss_m", digits = 2)
@@ -450,7 +510,8 @@ server <- function(input, output, session) {
     base_assumptions = assumptions_reactive,
     severity_tbl     = severity_tbl,
     selected_fit     = reactive(curve_fit$selected_fit()),
-    layers           = reinsurance$layers
+    layers           = reinsurance$layers,
+    risk_schedule    = risk_schedule_data
   )
 
   # --- Model run ---
@@ -459,16 +520,6 @@ server <- function(input, output, session) {
     run_status_txt("Running model...")
 
     withProgress(message = "Running model", value = 0, {
-      incProgress(0.10, detail = "Validating inputs")
-      isolate({
-        assign_production_budgets(
-          n              = mort_calc$n_productions(),
-          total_budget_m = input$total_budget_m,
-          min_budget_m   = input$min_budget_m,
-          max_budget_m   = input$max_budget_m
-        )
-      })
-
       incProgress(0.20, detail = "Capturing severity fit")
       fit_obj <- isolate(curve_fit$selected_fit())
       fit_tbl <- isolate(curve_fit$comparison_table())
@@ -479,6 +530,7 @@ server <- function(input, output, session) {
         severity_tbl   = severity_tbl(),
         fit            = fit_obj,
         layers         = reinsurance$layers(),
+        risk_schedule  = risk_schedule_data(),
         claims_history = claims_history_data()
       )
 
@@ -522,6 +574,24 @@ server <- function(input, output, session) {
       geom_histogram(bins = 50) +
       labs(title = "Distribution of loss to our layer", x = "Our layer loss (USD m)", y = "Simulation count") +
       theme_minimal(base_size = 13)
+  })
+
+  output$layer_summary_table <- renderDT({
+    req(sim_results())
+    df <- sim_results()$layer_summary %>%
+      transmute(
+        Layer           = layer,
+        Basis           = basis,
+        `Our layer`     = ifelse(our_layer, "Yes", ""),
+        `Attachment (USD m)` = attachment_m,
+        `Limit (USD m)` = limit_m,
+        `Expected loss (USD m)` = expected_loss_m,
+        `Prob. penetrated`      = prob_hit
+      )
+    datatable(df, rownames = FALSE,
+              options = list(dom = "t", scrollX = TRUE, autoWidth = TRUE, ordering = FALSE)) %>%
+      formatRound(c("Attachment (USD m)", "Limit (USD m)", "Expected loss (USD m)"), digits = 2) %>%
+      formatPercentage("Prob. penetrated", digits = 1)
   })
 
   output$summary_table <- renderDT({

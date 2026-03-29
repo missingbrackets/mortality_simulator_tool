@@ -21,6 +21,36 @@ default_severity_table <- function() {
   )
 }
 
+clean_risk_schedule <- function(df) {
+  names(df) <- tolower(trimws(names(df)))
+  names(df) <- gsub("[[:space:]]+", "_", names(df))
+  names(df) <- gsub("[^a-z0-9_]", "", names(df))
+
+  # Limit column aliases
+  for (alias in c("limit", "sum_insured", "sum_insured_m", "budget_m", "budget", "tsi_m", "tsi")) {
+    if (alias %in% names(df) && !"limit_m" %in% names(df))
+      names(df)[names(df) == alias] <- "limit_m"
+  }
+  if (!"limit_m" %in% names(df))
+    stop("Exposure schedule must contain a 'limit_m' column (aliases: limit, sum_insured, budget_m, tsi_m).")
+
+  df$limit_m <- as.numeric(df$limit_m)
+  if (!"name" %in% names(df)) df$name <- paste0("Risk ", seq_len(nrow(df)))
+
+  out <- df %>%
+    filter(is.finite(limit_m), limit_m > 0) %>%
+    mutate(name = as.character(name))
+
+  has_dates <- all(c("start_date", "end_date") %in% names(out))
+  if (has_dates) {
+    out$start_date <- as.Date(out$start_date)
+    out$end_date   <- as.Date(out$end_date)
+    out %>% select(name, limit_m, start_date, end_date)
+  } else {
+    out %>% select(name, limit_m)
+  }
+}
+
 clean_mortality_table <- function(df) {
   names(df) <- trimws(names(df))
   required <- c("Birth Year", "Age", "qx", "lx")
@@ -263,10 +293,24 @@ apply_layers_flex <- function(ground_up_m, event_detail, layers_tbl) {
   our_idx   <- which(layers_tbl$is_our_layer)
   other_idx <- setdiff(seq_len(n_layers)[-1], our_idx)
 
-  tibble(
-    sir_eroded_m     = layer_mat[, 1],
-    primary_loss_m   = if (length(other_idx) > 0) rowSums(layer_mat[, other_idx, drop = FALSE]) else rep(0, n),
-    our_layer_loss_m = if (length(our_idx)   > 0) rowSums(layer_mat[, our_idx,   drop = FALSE]) else rep(0, n)
+  # Per-layer summary table (one row per layer)
+  layer_summary <- tibble(
+    layer        = layers_tbl$name,
+    basis        = ifelse(layers_tbl$is_aggregate, "Aggregate", "Occurrence"),
+    our_layer    = layers_tbl$is_our_layer,
+    attachment_m = layers_tbl$attachment_m,
+    limit_m      = layers_tbl$limit_m,
+    expected_loss_m = colMeans(layer_mat),
+    prob_hit        = colMeans(layer_mat > 0)
+  )
+
+  list(
+    sim_losses = tibble(
+      sir_eroded_m     = layer_mat[, 1],
+      primary_loss_m   = if (length(other_idx) > 0) rowSums(layer_mat[, other_idx, drop = FALSE]) else rep(0, n),
+      our_layer_loss_m = if (length(our_idx)   > 0) rowSums(layer_mat[, our_idx,   drop = FALSE]) else rep(0, n)
+    ),
+    layer_summary = layer_summary
   )
 }
 

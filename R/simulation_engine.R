@@ -2,42 +2,72 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 
-simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, claims_history = NULL) {
+simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers,
+                                      risk_schedule = NULL, claims_history = NULL) {
   set.seed(assumptions$seed)
 
-  production_schedule <- make_production_schedule(
-    n_productions = assumptions$n_productions,
-    inception_date = assumptions$inception_date,
-    exposure_years = assumptions$exposure_years,
-    production_duration_days = assumptions$production_duration_days
-  ) %>%
-    mutate(
-      budget_m = assign_production_budgets(
-        n = assumptions$n_productions,
-        total_budget_m = assumptions$total_budget_m,
-        min_budget_m = assumptions$min_budget_m,
-        max_budget_m = assumptions$max_budget_m
-      )
-    )
+  # --- Build risk schedule ---
+  if (!is.null(risk_schedule)) {
+    has_dates <- all(c("start_date", "end_date") %in% names(risk_schedule))
+    n_risks   <- nrow(risk_schedule)
 
-  total_expected_events <- if (isTRUE(assumptions$freq_basis == "per_production")) {
-    assumptions$annual_claim_freq * assumptions$n_productions
+    if (has_dates) {
+      production_schedule <- risk_schedule %>%
+        mutate(
+          production_id  = row_number(),
+          exposure_days  = as.numeric(end_date - start_date),
+          exposure_years = exposure_days / 365.25,
+          budget_m       = limit_m
+        )
+    } else {
+      total_days    <- round(365.25 * assumptions$exposure_years)
+      start_offsets <- round(seq(0, total_days, length.out = n_risks + 1))[-(n_risks + 1)]
+      start_dates   <- as.Date(assumptions$inception_date) + start_offsets
+      dur           <- assumptions$production_duration_days
+
+      production_schedule <- risk_schedule %>%
+        mutate(
+          production_id  = row_number(),
+          start_date     = start_dates,
+          end_date       = start_dates + dur,
+          exposure_days  = dur,
+          exposure_years = dur / 365.25,
+          budget_m       = limit_m
+        ) %>%
+        select(-limit_m)
+    }
   } else {
-    assumptions$annual_claim_freq * assumptions$exposure_years
+    production_schedule <- make_production_schedule(
+      n_productions            = assumptions$n_productions,
+      inception_date           = assumptions$inception_date,
+      exposure_years           = assumptions$exposure_years,
+      production_duration_days = assumptions$production_duration_days
+    ) %>%
+      mutate(
+        budget_m = assign_production_budgets(
+          n              = assumptions$n_productions,
+          total_budget_m = assumptions$total_budget_m,
+          min_budget_m   = assumptions$min_budget_m,
+          max_budget_m   = assumptions$max_budget_m
+        )
+      )
   }
+
   n_prods <- nrow(production_schedule)
   budgets <- production_schedule$budget_m
 
+  # Use actual n_prods when freq basis is per-risk (handles uploaded schedule correctly)
+  total_expected_events <- if (isTRUE(assumptions$freq_basis == "per_production")) {
+    assumptions$annual_claim_freq * n_prods
+  } else {
+    assumptions$annual_claim_freq * assumptions$exposure_years
+  }
+
   empty_events <- tibble(
-    sim_id = integer(),
-    production_id = integer(),
-    event_id = integer(),
-    raw_severity_m = numeric(),
-    severity_m = numeric(),
-    production_budget_m = numeric(),
-    production_raw_loss_m = numeric(),
-    production_capped_loss_m = numeric(),
-    cap_factor = numeric()
+    sim_id = integer(), production_id = integer(), event_id = integer(),
+    raw_severity_m = numeric(), severity_m = numeric(),
+    production_budget_m = numeric(), production_raw_loss_m = numeric(),
+    production_capped_loss_m = numeric(), cap_factor = numeric()
   )
 
   event_detail <- map_dfr(seq_len(assumptions$n_sims), function(sim_id) {
@@ -57,9 +87,9 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
     ev %>%
       group_by(production_id) %>%
       mutate(
-        production_raw_loss_m = sum(raw_severity_m),
-        cap_factor = pmin(1, production_budget_m / production_raw_loss_m),
-        severity_m = raw_severity_m * cap_factor,
+        production_raw_loss_m    = sum(raw_severity_m),
+        cap_factor               = pmin(1, production_budget_m / production_raw_loss_m),
+        severity_m               = raw_severity_m * cap_factor,
         production_capped_loss_m = sum(severity_m)
       ) %>%
       ungroup() %>%
@@ -70,73 +100,78 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
 
   sim_ids <- tibble(sim_id = seq_len(assumptions$n_sims))
 
-  cast_loss_by_sim <- event_detail %>%
+  loss_by_sim <- event_detail %>%
     group_by(sim_id) %>%
     summarise(
-      cast_event_count = n(),
-      cast_loss_m = sum(severity_m),
-      cast_raw_loss_m = sum(raw_severity_m),
-      avg_event_severity_m = mean(severity_m),
-      productions_with_events = n_distinct(production_id),
-      productions_capped = n_distinct(production_id[production_raw_loss_m > production_budget_m + 1e-10]),
+      cast_event_count         = n(),
+      cast_loss_m              = sum(severity_m),
+      cast_raw_loss_m          = sum(raw_severity_m),
+      avg_event_severity_m     = mean(severity_m),
+      risks_with_events        = n_distinct(production_id),
+      risks_capped             = n_distinct(production_id[production_raw_loss_m > production_budget_m + 1e-10]),
       .groups = "drop"
     )
 
   attritional <- tibble(
-    sim_id = seq_len(assumptions$n_sims),
+    sim_id             = seq_len(assumptions$n_sims),
     attritional_loss_m = r_lognormal_from_mean_cv(assumptions$n_sims, assumptions$avg_attritional_m, assumptions$attritional_cv)
   )
 
   simulation_summary <- sim_ids %>%
-    left_join(cast_loss_by_sim, by = "sim_id") %>%
+    left_join(loss_by_sim, by = "sim_id") %>%
     left_join(attritional, by = "sim_id") %>%
     mutate(
-      cast_event_count = coalesce(cast_event_count, 0L),
-      cast_loss_m = coalesce(cast_loss_m, 0),
-      cast_raw_loss_m = coalesce(cast_raw_loss_m, 0),
+      cast_event_count     = coalesce(cast_event_count, 0L),
+      cast_loss_m          = coalesce(cast_loss_m, 0),
+      cast_raw_loss_m      = coalesce(cast_raw_loss_m, 0),
       avg_event_severity_m = coalesce(avg_event_severity_m, 0),
-      productions_with_events = coalesce(productions_with_events, 0L),
-      productions_capped = coalesce(productions_capped, 0L),
-      ground_up_m = cast_loss_m + attritional_loss_m
+      risks_with_events    = coalesce(risks_with_events, 0L),
+      risks_capped         = coalesce(risks_capped, 0L),
+      ground_up_m          = cast_loss_m + attritional_loss_m
     )
 
-  layer_results <- apply_layers_flex(simulation_summary$ground_up_m, event_detail, layers)
+  layer_out     <- apply_layers_flex(simulation_summary$ground_up_m, event_detail, layers)
+  layer_summary <- layer_out$layer_summary
 
-  simulation_summary <- bind_cols(simulation_summary, layer_results) %>%
+  simulation_summary <- bind_cols(simulation_summary, layer_out$sim_losses) %>%
     select(
-      sim_id, cast_event_count, productions_with_events, productions_capped,
+      sim_id, cast_event_count, risks_with_events, risks_capped,
       cast_raw_loss_m, cast_loss_m, attritional_loss_m, ground_up_m,
       sir_eroded_m, primary_loss_m, our_layer_loss_m, avg_event_severity_m
     )
 
   summary <- list(
-    expected_ground_up_m = mean(simulation_summary$ground_up_m),
-    expected_primary_loss_m = mean(simulation_summary$primary_loss_m),
+    expected_ground_up_m      = mean(simulation_summary$ground_up_m),
+    expected_primary_loss_m   = mean(simulation_summary$primary_loss_m),
     expected_our_layer_loss_m = mean(simulation_summary$our_layer_loss_m),
-    expected_sir_erosion_m = mean(simulation_summary$sir_eroded_m),
-    avg_cast_events = mean(simulation_summary$cast_event_count),
-    avg_event_severity_m = if (nrow(event_detail) > 0) mean(event_detail$severity_m) else 0,
-    prob_our_layer_hit = mean(simulation_summary$our_layer_loss_m > 0),
-    avg_productions_capped = mean(simulation_summary$productions_capped),
-    annual_claim_frequency = assumptions$annual_claim_freq,
-    total_expected_events = total_expected_events
+    expected_sir_erosion_m    = mean(simulation_summary$sir_eroded_m),
+    avg_cast_events           = mean(simulation_summary$cast_event_count),
+    avg_event_severity_m      = if (nrow(event_detail) > 0) mean(event_detail$severity_m) else 0,
+    prob_our_layer_hit        = mean(simulation_summary$our_layer_loss_m > 0),
+    avg_risks_capped          = mean(simulation_summary$risks_capped),
+    annual_claim_frequency    = assumptions$annual_claim_freq,
+    total_expected_events     = total_expected_events,
+    n_risks                   = n_prods,
+    schedule_uploaded         = !is.null(risk_schedule)
   )
 
   summary_table <- tibble(
     metric = c(
+      "Number of risks in portfolio",
       "Expected ground-up loss (USD m)",
       "Expected SIR erosion (USD m)",
       "Expected primary loss (USD m)",
       "Expected our layer loss (USD m)",
       "Probability our layer is hit",
-      "Average cast events per simulation",
-      "Average event severity after budget cap (USD m)",
-      "Average productions capped at budget",
+      "Average events per simulation",
+      "Average event severity after limit cap (USD m)",
+      "Average risks capped at limit",
       "Annual claim frequency (input)",
       "Total expected events over exposure",
       "Selected severity curve"
     ),
     value = c(
+      n_prods,
       summary$expected_ground_up_m,
       summary$expected_sir_erosion_m,
       summary$expected_primary_loss_m,
@@ -144,7 +179,7 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
       summary$prob_our_layer_hit,
       summary$avg_cast_events,
       summary$avg_event_severity_m,
-      summary$avg_productions_capped,
+      summary$avg_risks_capped,
       summary$annual_claim_frequency,
       summary$total_expected_events,
       fit$distribution
@@ -152,14 +187,15 @@ simulate_portfolio_losses <- function(assumptions, severity_tbl, fit, layers, cl
   )
 
   list(
-    assumptions = assumptions,
+    assumptions         = assumptions,
     production_schedule = production_schedule,
-    severity_input = severity_tbl,
+    severity_input      = severity_tbl,
     severity_fit_comparison = fit$comparison_table,
-    simulation_summary = simulation_summary,
-    event_detail = event_detail,
-    summary = summary,
-    summary_table = summary_table,
-    claims_history = claims_history
+    simulation_summary  = simulation_summary,
+    event_detail        = event_detail,
+    summary             = summary,
+    summary_table       = summary_table,
+    layer_summary       = layer_summary,
+    claims_history      = claims_history
   )
 }
